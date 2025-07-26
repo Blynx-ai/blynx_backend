@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 # Import our modules
 from db import db
 from auth import auth_service, UserRegister, UserLogin, UserResponse
+from business import router as business_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -30,6 +31,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include routers
+app.include_router(business_router)
 
 @app.get("/")
 async def root():

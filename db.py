@@ -87,12 +87,33 @@ class Database:
                 )
             ''')
             
+            # Create businesses table
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS businesses (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+                    name VARCHAR(255) NOT NULL,
+                    about_us TEXT,
+                    industry_type VARCHAR(100),
+                    customer_type VARCHAR(100),
+                    landing_page_url VARCHAR(500),
+                    instagram_url VARCHAR(500),
+                    linkedin_url VARCHAR(500),
+                    x_url VARCHAR(500),
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
             # Create index for better performance
             await conn.execute('''
                 CREATE INDEX IF NOT EXISTS idx_user_tokens_hash ON user_tokens(token_hash)
             ''')
             await conn.execute('''
                 CREATE INDEX IF NOT EXISTS idx_user_tokens_user_id ON user_tokens(user_id)
+            ''')
+            await conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_businesses_user_id ON businesses(user_id)
             ''')
             
             logger.info("Database tables created/verified successfully")
