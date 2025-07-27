@@ -7,18 +7,33 @@ from contextlib import asynccontextmanager
 from db import db
 from auth import auth_service, UserRegister, UserLogin, UserResponse
 from business import router as business_router
+from scraping_service import router as scraping_router
+from agent_service import router as agent_router
+from queue_manager import queue_manager, setup_signal_handlers
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     await db.connect()
+    
+    # Start Redis Queue worker
+    if queue_manager.start_worker():
+        print("RQ worker started successfully")
+    else:
+        print("Failed to start RQ worker")
+    
+    # Setup signal handlers for graceful shutdown
+    setup_signal_handlers()
+    
     yield
+    
     # Shutdown
+    queue_manager.shutdown()
     await db.disconnect()
 
 app = FastAPI(
     title="Blynx AI Backend",
-    description="AI-powered backend service for Blynx",
+    description="AI-powered backend service for Blynx with social media scraping and agent capabilities",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -34,6 +49,8 @@ app.add_middleware(
 
 # Include routers
 app.include_router(business_router)
+app.include_router(scraping_router)
+app.include_router(agent_router)
 
 @app.get("/")
 async def root():

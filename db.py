@@ -105,7 +105,68 @@ class Database:
                 )
             ''')
             
-            # Create index for better performance
+            # Create social_media_scrapes table
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS social_media_scrapes (
+                    id SERIAL PRIMARY KEY,
+                    business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
+                    platform VARCHAR(50) NOT NULL,
+                    url VARCHAR(500) NOT NULL,
+                    profile_data JSONB,
+                    post_data JSONB,
+                    scraping_method VARCHAR(50) NOT NULL,
+                    status VARCHAR(50) DEFAULT 'pending',
+                    error_message TEXT,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Create social_media_screenshots table
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS social_media_screenshots (
+                    id SERIAL PRIMARY KEY,
+                    scrape_id INTEGER REFERENCES social_media_scrapes(id) ON DELETE CASCADE,
+                    screenshot_order INTEGER NOT NULL,
+                    screenshot_base64 TEXT NOT NULL,
+                    screenshot_url TEXT,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Create scraping_jobs table
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS scraping_jobs (
+                    id SERIAL PRIMARY KEY,
+                    business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
+                    job_id VARCHAR(255) UNIQUE NOT NULL,
+                    platform VARCHAR(50) NOT NULL,
+                    url VARCHAR(500) NOT NULL,
+                    job_type VARCHAR(50) NOT NULL,
+                    status VARCHAR(50) DEFAULT 'queued',
+                    result JSONB,
+                    error_message TEXT,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Create agent_flows table
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS agent_flows (
+                    id SERIAL PRIMARY KEY,
+                    flow_id VARCHAR(255) UNIQUE NOT NULL,
+                    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
+                    source_url VARCHAR(500) NOT NULL,
+                    status VARCHAR(50) DEFAULT 'pending',
+                    result JSONB,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Create indexes for better performance
             await conn.execute('''
                 CREATE INDEX IF NOT EXISTS idx_user_tokens_hash ON user_tokens(token_hash)
             ''')
@@ -114,6 +175,24 @@ class Database:
             ''')
             await conn.execute('''
                 CREATE INDEX IF NOT EXISTS idx_businesses_user_id ON businesses(user_id)
+            ''')
+            await conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_social_scrapes_business_id ON social_media_scrapes(business_id)
+            ''')
+            await conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_social_scrapes_platform ON social_media_scrapes(platform)
+            ''')
+            await conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_scraping_jobs_business_id ON scraping_jobs(business_id)
+            ''')
+            await conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_scraping_jobs_job_id ON scraping_jobs(job_id)
+            ''')
+            await conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_agent_flows_user_id ON agent_flows(user_id)
+            ''')
+            await conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_agent_flows_flow_id ON agent_flows(flow_id)
             ''')
             
             logger.info("Database tables created/verified successfully")
