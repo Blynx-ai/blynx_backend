@@ -74,6 +74,73 @@ class AgentFlowManager:
         """Get status of a flow"""
         return self.flow_status.get(flow_id)
     
+    async def _save_flow_to_db(self, flow_id: str, user_id: int, business_id: int, source_urls: List[str], business_data: BusinessResponse):
+        """Save flow information to database"""
+        try:
+            async with db.get_connection() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO agent_flows (flow_id, user_id, business_id, source_url, status)
+                    VALUES ($1, $2, $3, $4, $5)
+                    """,
+                    flow_id, user_id, business_id, json.dumps(source_urls), FlowStatus.PENDING.value
+                )
+                logger.info(f"Flow {flow_id} saved to database")
+        except Exception as e:
+            logger.error(f"Error saving flow to database: {e}")
+    
+    async def _update_flow_status_in_db(self, flow_id: str, status: FlowStatus):
+        """Update flow status in database"""
+        try:
+            async with db.get_connection() as conn:
+                await conn.execute(
+                    """
+                    UPDATE agent_flows 
+                    SET status = $1, updated_at = $2 
+                    WHERE flow_id = $3
+                    """,
+                    status.value, datetime.utcnow(), flow_id
+                )
+        except Exception as e:
+            logger.error(f"Error updating flow status in database: {e}")
+    
+    async def _save_final_result_to_db(self, flow_id: str, result: Dict):
+        """Save final result to database"""
+        try:
+            async with db.get_connection() as conn:
+                await conn.execute(
+                    """
+                    UPDATE agent_flows 
+                    SET result = $1, updated_at = $2 
+                    WHERE flow_id = $3
+                    """,
+                    json.dumps(result), datetime.utcnow(), flow_id
+                )
+                logger.info(f"Final result saved for flow {flow_id}")
+        except Exception as e:
+            logger.error(f"Error saving final result to database: {e}")
+    
+    async def _log_flow_event(self, flow_id: str, agent: str, message: str):
+        """Log a flow event"""
+        log_entry = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "agent": agent,
+            "message": message
+        }
+        
+        if flow_id not in self.flow_logs:
+            self.flow_logs[flow_id] = []
+        
+        self.flow_logs[flow_id].append(log_entry)
+        logger.info(f"Flow {flow_id} - {agent}: {message}")
+    
+    async def _check_stop_signal(self, flow_id: str) -> bool:
+        """Check if flow should be stopped"""
+        if self.stop_signals.get(flow_id, False):
+            await self._log_flow_event(flow_id, "SYSTEM", "Flow stop signal received")
+            return True
+        return False
+    
     async def _execute_agent_flow(self, flow_id: str, user_id: int, business_id: int, source_urls: List[str], business_data: BusinessResponse):
         """Execute the complete agent flow with business data"""
         try:
