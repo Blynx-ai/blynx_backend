@@ -105,10 +105,30 @@ class Database:
                 )
             ''')
             
-            # Create social_media_scrapes table
+            # Create agent_flows table (updated with more tracking)
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS agent_flows (
+                    id SERIAL PRIMARY KEY,
+                    flow_id VARCHAR(255) UNIQUE NOT NULL,
+                    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
+                    source_urls JSONB NOT NULL,
+                    status VARCHAR(50) DEFAULT 'pending',
+                    result JSONB,
+                    error_message TEXT,
+                    total_sources INTEGER DEFAULT 0,
+                    completed_sources INTEGER DEFAULT 0,
+                    failed_sources INTEGER DEFAULT 0,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Create social_media_scrapes table (updated with flow_id)
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS social_media_scrapes (
                     id SERIAL PRIMARY KEY,
+                    flow_id VARCHAR(255) REFERENCES agent_flows(flow_id) ON DELETE CASCADE,
                     business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
                     platform VARCHAR(50) NOT NULL,
                     url VARCHAR(500) NOT NULL,
@@ -117,27 +137,52 @@ class Database:
                     scraping_method VARCHAR(50) NOT NULL,
                     status VARCHAR(50) DEFAULT 'pending',
                     error_message TEXT,
+                    retry_count INTEGER DEFAULT 0,
+                    screenshots_taken BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             
-            # Create social_media_screenshots table
+            # Create social_media_screenshots table (updated)
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS social_media_screenshots (
                     id SERIAL PRIMARY KEY,
                     scrape_id INTEGER REFERENCES social_media_scrapes(id) ON DELETE CASCADE,
+                    flow_id VARCHAR(255) REFERENCES agent_flows(flow_id) ON DELETE CASCADE,
                     screenshot_order INTEGER NOT NULL,
                     screenshot_base64 TEXT NOT NULL,
                     screenshot_url TEXT,
+                    scroll_position INTEGER DEFAULT 0,
+                    viewport_info JSONB,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             
-            # Create scraping_jobs table
+            # Create news_research table (NEW)
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS news_research (
+                    id SERIAL PRIMARY KEY,
+                    flow_id VARCHAR(255) REFERENCES agent_flows(flow_id) ON DELETE CASCADE,
+                    business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
+                    company_name VARCHAR(255) NOT NULL,
+                    search_query VARCHAR(500) NOT NULL,
+                    news_articles JSONB,
+                    sentiment_analysis JSONB,
+                    key_insights JSONB,
+                    status VARCHAR(50) DEFAULT 'pending',
+                    error_message TEXT,
+                    total_articles INTEGER DEFAULT 0,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Create scraping_jobs table (updated with flow_id)
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS scraping_jobs (
                     id SERIAL PRIMARY KEY,
+                    flow_id VARCHAR(255) REFERENCES agent_flows(flow_id) ON DELETE CASCADE,
                     business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
                     job_id VARCHAR(255) UNIQUE NOT NULL,
                     platform VARCHAR(50) NOT NULL,
@@ -146,23 +191,23 @@ class Database:
                     status VARCHAR(50) DEFAULT 'queued',
                     result JSONB,
                     error_message TEXT,
+                    retry_count INTEGER DEFAULT 0,
+                    fallback_used BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             
-            # Create agent_flows table
+            # Create flow_logs table (NEW - for detailed flow logging)
             await conn.execute('''
-                CREATE TABLE IF NOT EXISTS agent_flows (
+                CREATE TABLE IF NOT EXISTS flow_logs (
                     id SERIAL PRIMARY KEY,
-                    flow_id VARCHAR(255) UNIQUE NOT NULL,
-                    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-                    business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
-                    source_url VARCHAR(500) NOT NULL,
-                    status VARCHAR(50) DEFAULT 'pending',
-                    result JSONB,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    flow_id VARCHAR(255) REFERENCES agent_flows(flow_id) ON DELETE CASCADE,
+                    agent_type VARCHAR(100) NOT NULL,
+                    log_level VARCHAR(20) DEFAULT 'INFO',
+                    message TEXT NOT NULL,
+                    metadata JSONB,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             
@@ -177,10 +222,28 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_businesses_user_id ON businesses(user_id)
             ''')
             await conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_agent_flows_user_id ON agent_flows(user_id)
+            ''')
+            await conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_agent_flows_flow_id ON agent_flows(flow_id)
+            ''')
+            await conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_social_scrapes_flow_id ON social_media_scrapes(flow_id)
+            ''')
+            await conn.execute('''
                 CREATE INDEX IF NOT EXISTS idx_social_scrapes_business_id ON social_media_scrapes(business_id)
             ''')
             await conn.execute('''
                 CREATE INDEX IF NOT EXISTS idx_social_scrapes_platform ON social_media_scrapes(platform)
+            ''')
+            await conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_screenshots_flow_id ON social_media_screenshots(flow_id)
+            ''')
+            await conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_news_research_flow_id ON news_research(flow_id)
+            ''')
+            await conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_scraping_jobs_flow_id ON scraping_jobs(flow_id)
             ''')
             await conn.execute('''
                 CREATE INDEX IF NOT EXISTS idx_scraping_jobs_business_id ON scraping_jobs(business_id)
@@ -189,10 +252,10 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_scraping_jobs_job_id ON scraping_jobs(job_id)
             ''')
             await conn.execute('''
-                CREATE INDEX IF NOT EXISTS idx_agent_flows_user_id ON agent_flows(user_id)
+                CREATE INDEX IF NOT EXISTS idx_flow_logs_flow_id ON flow_logs(flow_id)
             ''')
             await conn.execute('''
-                CREATE INDEX IF NOT EXISTS idx_agent_flows_flow_id ON agent_flows(flow_id)
+                CREATE INDEX IF NOT EXISTS idx_flow_logs_agent_type ON flow_logs(agent_type)
             ''')
             
             logger.info("Database tables created/verified successfully")

@@ -1,13 +1,14 @@
 import asyncio
 import json
 import logging
+import uuid
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 from enum import Enum
-import uuid
 from gemini_client import gemini_client
 from db import db
 from business import BusinessResponse
+from news_agent import news_agent
 
 logger = logging.getLogger(__name__)
 
@@ -80,10 +81,10 @@ class AgentFlowManager:
             async with db.get_connection() as conn:
                 await conn.execute(
                     """
-                    INSERT INTO agent_flows (flow_id, user_id, business_id, source_url, status)
-                    VALUES ($1, $2, $3, $4, $5)
+                    INSERT INTO agent_flows (flow_id, user_id, business_id, source_urls, status, total_sources)
+                    VALUES ($1, $2, $3, $4, $5, $6)
                     """,
-                    flow_id, user_id, business_id, json.dumps(source_urls), FlowStatus.PENDING.value
+                    flow_id, user_id, business_id, json.dumps(source_urls), FlowStatus.PENDING.value, len(source_urls)
                 )
                 logger.info(f"Flow {flow_id} saved to database")
         except Exception as e:
@@ -104,6 +105,21 @@ class AgentFlowManager:
         except Exception as e:
             logger.error(f"Error updating flow status in database: {e}")
     
+    async def _update_flow_progress_in_db(self, flow_id: str, completed_sources: int, failed_sources: int):
+        """Update flow progress in database"""
+        try:
+            async with db.get_connection() as conn:
+                await conn.execute(
+                    """
+                    UPDATE agent_flows 
+                    SET completed_sources = $1, failed_sources = $2, updated_at = $3 
+                    WHERE flow_id = $4
+                    """,
+                    completed_sources, failed_sources, datetime.utcnow(), flow_id
+                )
+        except Exception as e:
+            logger.error(f"Error updating flow progress in database: {e}")
+    
     async def _save_final_result_to_db(self, flow_id: str, result: Dict):
         """Save final result to database"""
         try:
@@ -120,12 +136,13 @@ class AgentFlowManager:
         except Exception as e:
             logger.error(f"Error saving final result to database: {e}")
     
-    async def _log_flow_event(self, flow_id: str, agent: str, message: str):
-        """Log a flow event"""
+    async def _log_flow_event(self, flow_id: str, agent: str, message: str, metadata: Dict = None):
+        """Log a flow event both in memory and database"""
         log_entry = {
             "timestamp": datetime.utcnow().isoformat(),
             "agent": agent,
-            "message": message
+            "message": message,
+            "metadata": metadata or {}
         }
         
         if flow_id not in self.flow_logs:
@@ -133,6 +150,19 @@ class AgentFlowManager:
         
         self.flow_logs[flow_id].append(log_entry)
         logger.info(f"Flow {flow_id} - {agent}: {message}")
+        
+        # Save to database
+        try:
+            async with db.get_connection() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO flow_logs (flow_id, agent_type, log_level, message, metadata)
+                    VALUES ($1, $2, $3, $4, $5)
+                    """,
+                    flow_id, agent, "INFO", message, json.dumps(metadata or {})
+                )
+        except Exception as e:
+            logger.error(f"Error saving flow log to database: {e}")
     
     async def _check_stop_signal(self, flow_id: str) -> bool:
         """Check if flow should be stopped"""
@@ -142,11 +172,11 @@ class AgentFlowManager:
         return False
     
     async def _execute_agent_flow(self, flow_id: str, user_id: int, business_id: int, source_urls: List[str], business_data: BusinessResponse):
-        """Execute the complete agent flow with business data"""
+        """Execute the complete agent flow with enhanced functionality"""
         try:
             self.flow_status[flow_id] = FlowStatus.RUNNING
             await self._update_flow_status_in_db(flow_id, FlowStatus.RUNNING)
-            await self._log_flow_event(flow_id, "SYSTEM", f"Starting agent flow for {len(source_urls)} URLs")
+            await self._log_flow_event(flow_id, "SYSTEM", f"Starting enhanced agent flow for {len(source_urls)} URLs")
             
             # Phase 1: Business Context Analysis
             if await self._check_stop_signal(flow_id):
@@ -155,47 +185,65 @@ class AgentFlowManager:
             await self._log_flow_event(flow_id, "CONTEXT", "Analyzing business context")
             business_context = await self._analyze_business_context(flow_id, business_data)
             
-            # Phase 2: Multi-Source Data Ingestion
+            # Phase 2: News Research (NEW)
             if await self._check_stop_signal(flow_id):
                 return
                 
-            await self._log_flow_event(flow_id, "INGESTOR", "Starting multi-source data ingestion")
+            await self._log_flow_event(flow_id, "NEWS", "Starting news research")
+            news_research = await news_agent.research_company_news(
+                flow_id, business_id, business_data.name, business_data.industry_type
+            )
+            
+            # Phase 3: Enhanced Multi-Source Data Ingestion
+            if await self._check_stop_signal(flow_id):
+                return
+                
+            await self._log_flow_event(flow_id, "INGESTOR", "Starting enhanced multi-source data ingestion")
             all_scraped_data = {}
+            completed_sources = 0
+            failed_sources = 0
             
             for i, url in enumerate(source_urls):
                 if await self._check_stop_signal(flow_id):
                     return
                     
                 await self._log_flow_event(flow_id, "INGESTOR", f"Scraping source {i+1}/{len(source_urls)}: {url}")
-                scraped_data = await self._run_ingestor_agent(flow_id, business_id, url)
+                scraped_data = await self._run_enhanced_ingestor_agent(flow_id, business_id, url)
                 
                 if scraped_data and scraped_data.get('success'):
                     platform_name = self._detect_platform(url)
                     all_scraped_data[platform_name] = scraped_data
+                    completed_sources += 1
                     await self._log_flow_event(flow_id, "INGESTOR", f"Successfully scraped {platform_name}")
                 else:
+                    failed_sources += 1
                     await self._log_flow_event(flow_id, "INGESTOR", f"Failed to scrape {url}")
+                
+                # Update progress
+                await self._update_flow_progress_in_db(flow_id, completed_sources, failed_sources)
             
             if not all_scraped_data:
                 raise Exception("No data could be scraped from any source")
             
             await self._log_flow_event(flow_id, "INGESTOR", f"Data ingestion completed for {len(all_scraped_data)} sources")
             
-            # Phase 3: Parallel Analyzer Agents
+            # Phase 4: Enhanced Parallel Analyzer Agents
             if await self._check_stop_signal(flow_id):
                 return
                 
-            await self._log_flow_event(flow_id, "SYSTEM", "Starting parallel analysis phase")
+            await self._log_flow_event(flow_id, "SYSTEM", "Starting enhanced parallel analysis phase")
             
             combined_data = {
                 "business_context": business_context,
-                "scraped_data": all_scraped_data
+                "scraped_data": all_scraped_data,
+                "news_research": news_research.get('data', {}) if news_research.get('success') else {}
             }
             
             analyzer_tasks = [
                 self._run_content_classifier(flow_id, combined_data),
                 self._run_data_extractor(flow_id, combined_data),
-                self._run_red_flags_detector(flow_id, combined_data)
+                self._run_red_flags_detector(flow_id, combined_data),
+                self._run_news_analyzer(flow_id, combined_data)  # NEW
             ]
             
             analyzer_results = await asyncio.gather(*analyzer_tasks, return_exceptions=True)
@@ -206,26 +254,28 @@ class AgentFlowManager:
                     await self._log_flow_event(flow_id, "ANALYZER", f"Analyzer {i+1} failed: {str(result)}")
                     analyzer_results[i] = {"error": str(result)}
             
-            content_classification, data_extraction, red_flags = analyzer_results
+            content_classification, data_extraction, red_flags, news_analysis = analyzer_results
             
-            # Phase 4: Parallel Evaluator Agents
+            # Phase 5: Enhanced Parallel Evaluator Agents
             if await self._check_stop_signal(flow_id):
                 return
                 
-            await self._log_flow_event(flow_id, "SYSTEM", "Starting parallel evaluation phase")
+            await self._log_flow_event(flow_id, "SYSTEM", "Starting enhanced parallel evaluation phase")
             
             context_data = {
                 **combined_data,
                 "content_classification": content_classification,
                 "data_extraction": data_extraction,
-                "red_flags": red_flags
+                "red_flags": red_flags,
+                "news_analysis": news_analysis
             }
             
             evaluator_tasks = [
                 self._run_accuracy_evaluator(flow_id, context_data),
                 self._run_impact_evaluator(flow_id, context_data),
                 self._run_language_clarity_evaluator(flow_id, context_data),
-                self._run_brand_consistency_evaluator(flow_id, context_data)  # New evaluator
+                self._run_brand_consistency_evaluator(flow_id, context_data),
+                self._run_reputation_evaluator(flow_id, context_data)  # NEW
             ]
             
             evaluator_results = await asyncio.gather(*evaluator_tasks, return_exceptions=True)
@@ -236,52 +286,62 @@ class AgentFlowManager:
                     await self._log_flow_event(flow_id, "EVALUATOR", f"Evaluator {i+1} failed: {str(result)}")
                     evaluator_results[i] = {"error": str(result)}
             
-            accuracy_eval, impact_eval, language_eval, brand_eval = evaluator_results
+            accuracy_eval, impact_eval, language_eval, brand_eval, reputation_eval = evaluator_results
             
-            # Phase 5: Scorer Agent
+            # Phase 6: Enhanced Scorer Agent
             if await self._check_stop_signal(flow_id):
                 return
                 
-            await self._log_flow_event(flow_id, "SCORER", "Computing Blynx Score")
+            await self._log_flow_event(flow_id, "SCORER", "Computing enhanced Blynx Score")
             
             evaluation_data = {
                 **context_data,
                 "accuracy_evaluation": accuracy_eval,
                 "impact_evaluation": impact_eval,
                 "language_evaluation": language_eval,
-                "brand_evaluation": brand_eval
+                "brand_evaluation": brand_eval,
+                "reputation_evaluation": reputation_eval
             }
             
-            blynx_score = await self._run_scorer_agent(flow_id, evaluation_data)
+            blynx_score = await self._run_enhanced_scorer_agent(flow_id, evaluation_data)
             
-            # Phase 6: Feedback Generator
+            # Phase 7: Enhanced Feedback Generator
             if await self._check_stop_signal(flow_id):
                 return
                 
-            await self._log_flow_event(flow_id, "FEEDBACK", "Generating comprehensive feedback")
+            await self._log_flow_event(flow_id, "FEEDBACK", "Generating comprehensive enhanced feedback")
             
             final_data = {
                 **evaluation_data,
                 "blynx_score": blynx_score
             }
             
-            feedback = await self._run_feedback_generator(flow_id, final_data)
+            feedback = await self._run_enhanced_feedback_generator(flow_id, final_data)
             
             # Compile final result
             final_result = {
                 "flow_id": flow_id,
                 "source_urls": source_urls,
                 "business_context": business_context,
+                "news_research": news_research.get('data', {}) if news_research.get('success') else {},
                 "blynx_score": blynx_score,
                 "feedback": feedback,
                 "analysis_details": {
                     "content_classification": content_classification,
                     "data_extraction": data_extraction,
                     "red_flags": red_flags,
+                    "news_analysis": news_analysis,
                     "accuracy_evaluation": accuracy_eval,
                     "impact_evaluation": impact_eval,
                     "language_evaluation": language_eval,
-                    "brand_evaluation": brand_eval
+                    "brand_evaluation": brand_eval,
+                    "reputation_evaluation": reputation_eval
+                },
+                "statistics": {
+                    "total_sources": len(source_urls),
+                    "completed_sources": completed_sources,
+                    "failed_sources": failed_sources,
+                    "success_rate": completed_sources / len(source_urls) if source_urls else 0
                 },
                 "timestamp": datetime.utcnow().isoformat()
             }
@@ -291,7 +351,7 @@ class AgentFlowManager:
             
             await self._save_final_result_to_db(flow_id, final_result)
             await self._update_flow_status_in_db(flow_id, FlowStatus.COMPLETED)
-            await self._log_flow_event(flow_id, "SYSTEM", "Agent flow completed successfully")
+            await self._log_flow_event(flow_id, "SYSTEM", "Enhanced agent flow completed successfully")
             
         except Exception as e:
             logger.error(f"Agent flow {flow_id} failed: {str(e)}")
@@ -335,6 +395,7 @@ class AgentFlowManager:
             4. industry_standards: (relevant industry standards)
             5. competitive_landscape: (general competitive context)
             6. key_success_metrics: (what success looks like for this business)
+            7. reputation_factors: (factors that impact reputation in this industry)
             """
             
             result = await gemini_client.generate_json_content(prompt)
@@ -345,54 +406,24 @@ class AgentFlowManager:
             await self._log_flow_event(flow_id, "CONTEXT", f"Error: {str(e)}")
             return {"error": str(e)}
     
-    async def _run_brand_consistency_evaluator(self, flow_id: str, context_data: Dict) -> Dict:
-        """Run brand consistency evaluator agent"""
-        try:
-            await self._log_flow_event(flow_id, "BRAND", "Evaluating brand consistency")
-            
-            prompt = f"""
-            Evaluate brand consistency across all platforms and content:
-
-            Context Data: {json.dumps(context_data, indent=2)}
-
-            Provide a JSON response with:
-            1. cross_platform_consistency: (0-100)
-            2. brand_voice_alignment: (0-100)
-            3. visual_consistency: (0-100)
-            4. message_coherence: (0-100)
-            5. brand_identity_strength: (poor/fair/good/excellent)
-            6. inconsistencies_found: [list of brand inconsistencies]
-            7. brand_opportunities: [opportunities to strengthen brand]
-            8. overall_brand_score: (0-100)
-            """
-            
-            result = await gemini_client.generate_json_content(prompt)
-            await self._log_flow_event(flow_id, "BRAND", "Brand consistency evaluation completed")
-            return result
-            
-        except Exception as e:
-            await self._log_flow_event(flow_id, "BRAND", f"Error: {str(e)}")
-            return {"error": str(e)}
-    
-    # Agent implementations
-    async def _run_ingestor_agent(self, flow_id: str, business_id: int, source_url: str) -> Dict:
-        """Run the ingestor agent"""
-        from scraping_tasks import scrape_instagram_basic, scrape_x_basic, scrape_linkedin_basic
+    async def _run_enhanced_ingestor_agent(self, flow_id: str, business_id: int, source_url: str) -> Dict:
+        """Run the enhanced ingestor agent with fallback"""
+        from scraping_tasks import scrape_instagram_enhanced, scrape_x_enhanced, scrape_linkedin_enhanced
         from landing_page_agent import landing_page_agent
         
         try:
             # Determine the platform based on URL
             if 'instagram.com' in source_url:
                 result = await asyncio.get_event_loop().run_in_executor(
-                    None, scrape_instagram_basic, business_id, source_url, flow_id
+                    None, scrape_instagram_enhanced, business_id, source_url, flow_id
                 )
             elif 'x.com' in source_url or 'twitter.com' in source_url:
                 result = await asyncio.get_event_loop().run_in_executor(
-                    None, scrape_x_basic, business_id, source_url, flow_id
+                    None, scrape_x_enhanced, business_id, source_url, flow_id
                 )
             elif 'linkedin.com' in source_url:
                 result = await asyncio.get_event_loop().run_in_executor(
-                    None, scrape_linkedin_basic, business_id, source_url, flow_id
+                    None, scrape_linkedin_enhanced, business_id, source_url, flow_id
                 )
             else:
                 # Treat as landing page
@@ -570,62 +601,163 @@ class AgentFlowManager:
             await self._log_flow_event(flow_id, "LANGUAGE", f"Error: {str(e)}")
             return {"error": str(e)}
     
-    async def _run_scorer_agent(self, flow_id: str, evaluation_data: Dict) -> Dict:
-        """Run scorer agent to compute Blynx Score"""
+    async def _run_news_analyzer(self, flow_id: str, context_data: Dict) -> Dict:
+        """Run news analyzer agent"""
         try:
-            await self._log_flow_event(flow_id, "SCORER", "Computing Blynx Score")
+            await self._log_flow_event(flow_id, "NEWS_ANALYZER", "Analyzing news research data")
             
             prompt = f"""
-            Compute a comprehensive Blynx Score based on all evaluations:
+            Analyze the news research data in context of the business:
+
+            Context Data: {json.dumps(context_data, indent=2)}
+
+            Provide a JSON response with:
+            1. news_sentiment_score: (0-100, where 100 is most positive)
+            2. market_position_analysis: (description of company's market position based on news)
+            3. recent_developments: [list of significant recent developments]
+            4. public_perception: (positive/neutral/negative with explanation)
+            5. competitive_mentions: [any mentions of competitors]
+            6. risk_factors: [potential risks identified from news]
+            7. opportunities: [opportunities identified from news]
+            8. overall_news_impact: (positive/neutral/negative)
+            """
+            
+            result = await gemini_client.generate_json_content(prompt)
+            await self._log_flow_event(flow_id, "NEWS_ANALYZER", "News analysis completed")
+            return result
+            
+        except Exception as e:
+            await self._log_flow_event(flow_id, "NEWS_ANALYZER", f"Error: {str(e)}")
+            return {"error": str(e)}
+    
+    async def _run_brand_consistency_evaluator(self, flow_id: str, context_data: Dict) -> Dict:
+        """Run brand consistency evaluator agent"""
+        try:
+            await self._log_flow_event(flow_id, "BRAND", "Evaluating brand consistency")
+            
+            prompt = f"""
+            Evaluate brand consistency across all content and business context:
+
+            Context Data: {json.dumps(context_data, indent=2)}
+
+            Provide a JSON response with:
+            1. visual_consistency_score: (0-100)
+            2. message_consistency_score: (0-100)
+            3. tone_consistency_score: (0-100)
+            4. value_alignment_score: (0-100)
+            5. brand_voice_match: (poor/fair/good/excellent)
+            6. inconsistencies_found: [list of brand inconsistencies]
+            7. brand_strength_indicators: [positive brand elements]
+            8. overall_brand_score: (0-100)
+            """
+            
+            result = await gemini_client.generate_json_content(prompt)
+            await self._log_flow_event(flow_id, "BRAND", "Brand consistency evaluation completed")
+            return result
+            
+        except Exception as e:
+            await self._log_flow_event(flow_id, "BRAND", f"Error: {str(e)}")
+            return {"error": str(e)}
+    
+    async def _run_reputation_evaluator(self, flow_id: str, context_data: Dict) -> Dict:
+        """Run reputation evaluator agent"""
+        try:
+            await self._log_flow_event(flow_id, "REPUTATION", "Evaluating online reputation")
+            
+            prompt = f"""
+            Evaluate online reputation based on all available data:
+
+            Context Data: {json.dumps(context_data, indent=2)}
+
+            Provide a JSON response with:
+            1. reputation_score: (0-100)
+            2. credibility_indicators: [factors that enhance credibility]
+            3. trust_factors: [elements that build trust]
+            4. reputation_risks: [potential reputation risks identified]
+            5. online_presence_strength: (weak/moderate/strong)
+            6. stakeholder_perception: (description of how stakeholders might perceive)
+            7. reputation_management_suggestions: [actionable suggestions]
+            8. crisis_potential: (low/medium/high with explanation)
+            """
+            
+            result = await gemini_client.generate_json_content(prompt)
+            await self._log_flow_event(flow_id, "REPUTATION", "Reputation evaluation completed")
+            return result
+            
+        except Exception as e:
+            await self._log_flow_event(flow_id, "REPUTATION", f"Error: {str(e)}")
+            return {"error": str(e)}
+    
+    async def _run_enhanced_scorer_agent(self, flow_id: str, evaluation_data: Dict) -> Dict:
+        """Run enhanced scorer agent to compute comprehensive Blynx Score"""
+        try:
+            await self._log_flow_event(flow_id, "SCORER", "Computing enhanced Blynx Score")
+            
+            prompt = f"""
+            Compute a comprehensive Blynx Score based on all evaluations including news analysis:
 
             Evaluation Data: {json.dumps(evaluation_data, indent=2)}
 
-            Use weighted scoring where:
-            - Accuracy (30%): Factual correctness and logic
-            - Impact (25%): Usefulness and influence
-            - Language (20%): Clarity and communication
-            - Red Flags (25%): Penalty for risks/issues
+            Use enhanced weighted scoring where:
+            - Accuracy (25%): Factual correctness and logic
+            - Impact (20%): Usefulness and influence
+            - Language (15%): Clarity and communication
+            - Brand Consistency (15%): Brand alignment and consistency
+            - Reputation (15%): Online reputation and trust factors
+            - Red Flags (10%): Penalty for risks/issues
 
             Provide a JSON response with:
             1. accuracy_weighted_score: (0-100)
             2. impact_weighted_score: (0-100)
             3. language_weighted_score: (0-100)
-            4. red_flag_penalty: (0-100)
-            5. final_blynx_score: (0-100)
-            6. score_breakdown: (explanation of how score was calculated)
-            7. grade: (A+, A, B+, B, C+, C, D, F)
+            4. brand_weighted_score: (0-100)
+            5. reputation_weighted_score: (0-100)
+            6. red_flag_penalty: (0-100)
+            7. final_blynx_score: (0-100)
+            8. score_breakdown: (detailed explanation of calculation)
+            9. grade: (A+, A, A-, B+, B, B-, C+, C, C-, D, F)
+            10. performance_category: (Excellent/Good/Average/Below Average/Poor)
+            11. news_impact_factor: (how news research affected the score)
             """
             
             result = await gemini_client.generate_json_content(prompt)
-            await self._log_flow_event(flow_id, "SCORER", "Blynx Score computed")
+            await self._log_flow_event(flow_id, "SCORER", "Enhanced Blynx Score computed")
             return result
             
         except Exception as e:
             await self._log_flow_event(flow_id, "SCORER", f"Error: {str(e)}")
             return {"error": str(e)}
     
-    async def _run_feedback_generator(self, flow_id: str, final_data: Dict) -> Dict:
-        """Run feedback generator agent"""
+    async def _run_enhanced_feedback_generator(self, flow_id: str, final_data: Dict) -> Dict:
+        """Run enhanced feedback generator agent"""
         try:
-            await self._log_flow_event(flow_id, "FEEDBACK", "Generating structured feedback")
+            await self._log_flow_event(flow_id, "FEEDBACK", "Generating comprehensive enhanced feedback")
             
             prompt = f"""
-            Generate comprehensive feedback based on all analysis results:
+            Generate comprehensive feedback based on all analysis results including news insights:
 
             Final Data: {json.dumps(final_data, indent=2)}
 
             Provide a JSON response with:
-            1. strengths: [list of content strengths]
-            2. areas_for_improvement: [list of improvement areas]
-            3. actionable_recommendations: [specific suggestions]
-            4. key_insights: [important findings]
-            5. priority_actions: [most important next steps]
-            6. overall_assessment: (summary paragraph)
-            7. next_steps: [recommended actions to improve score]
+            1. executive_summary: (high-level overview of findings)
+            2. strengths: [list of content and business strengths]
+            3. areas_for_improvement: [detailed improvement areas]
+            4. critical_issues: [urgent issues requiring immediate attention]
+            5. brand_recommendations: [specific brand consistency suggestions]
+            6. reputation_recommendations: [reputation management suggestions]
+            7. content_strategy_suggestions: [content optimization recommendations]
+            8. news_insights: [key insights from news research]
+            9. competitive_advantages: [identified competitive strengths]
+            10. risk_mitigation: [strategies to address identified risks]
+            11. actionable_next_steps: [prioritized action items]
+            12. timeline_recommendations: [suggested timeline for improvements]
+            13. resource_requirements: [estimated resources needed for improvements]
+            14. success_metrics: [KPIs to track improvement progress]
+            15. overall_assessment: (comprehensive summary paragraph)
             """
             
             result = await gemini_client.generate_json_content(prompt)
-            await self._log_flow_event(flow_id, "FEEDBACK", "Feedback generation completed")
+            await self._log_flow_event(flow_id, "FEEDBACK", "Enhanced feedback generation completed")
             return result
             
         except Exception as e:
